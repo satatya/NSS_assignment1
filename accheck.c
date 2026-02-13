@@ -1,13 +1,13 @@
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/acl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-// #include <sys/acl.h>
 #include <pwd.h>
 #include <grp.h>
 #include <unistd.h>
+#include <errno.h>
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
@@ -31,39 +31,38 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Required output for reasoning
     printf("Reasoning for user : %s (UID : %u)\n", target_user, pw->pw_uid);
     printf("File Owner UID: %u | File Group GID : %u\n", sb.st_uid, sb.st_gid);
     printf("Traditional Mode : %o\n", sb.st_mode & 0777);
 
     int allowed = 0;
-    char *final_reason = "Denied by default";
+    char *reason = "Denied by default";
 
+    // 1. Root Check
     if (pw->pw_uid == 0) {
-        allowed = 1;
-        final_reason = "User is root";
-        goto result;
+        allowed = 1; reason = "User is root"; goto result;
     }
 
+    // 2. Owner Check
     if (pw->pw_uid == sb.st_uid) {
-        int mode_bit = (strcmp(op_str, "read") == 0) ? S_IRUSR : 
-                       (strcmp(op_str, "write") == 0) ? S_IWUSR : S_IXUSR;
-        if (sb.st_mode & mode_bit) {
-            allowed = 1;
-            final_reason = "Match in Owner bits";
-        }
+        int bit = (strcmp(op_str, "read") == 0) ? S_IRUSR : 
+                  (strcmp(op_str, "write") == 0) ? S_IWUSR : S_IXUSR;
+        if (sb.st_mode & bit) { allowed = 1; reason = "Owner bits allow access"; }
         goto result;
     }
 
+    // 3. ACL & Mask Check (FreeBSD API)
     acl_t acl = acl_get_file(path, ACL_TYPE_ACCESS);
-    if (acl != NULL) {
+    if (acl) {
         acl_entry_t entry;
-        int entry_id = ACL_FIRST_ENTRY;
-        int mask = 0x7, user_perms = 0, found_user = 0;
-        int req_bit = (strcmp(op_str, "read") == 0) ? ACL_READ :
-                      (strcmp(op_str, "write") == 0) ? ACL_WRITE : ACL_EXECUTE;
+        int id = ACL_FIRST_ENTRY;
+        int mask = 0x7, user_perms = 0, found = 0;
+        int req = (strcmp(op_str, "read") == 0) ? ACL_READ :
+                  (strcmp(op_str, "write") == 0) ? ACL_WRITE : ACL_EXECUTE;
 
-        while (acl_get_entry(acl, entry_id, &entry) == 1) {
-            entry_id = ACL_NEXT_ENTRY;
+        while (acl_get_entry(acl, id, &entry) == 1) {
+            id = ACL_NEXT_ENTRY;
             acl_tag_t tag;
             acl_get_tag_type(entry, &tag);
             acl_permset_t ps;
@@ -75,33 +74,34 @@ int main(int argc, char *argv[]) {
                 if (acl_get_perm(ps, ACL_WRITE)) mask |= ACL_WRITE;
                 if (acl_get_perm(ps, ACL_EXECUTE)) mask |= ACL_EXECUTE;
             } else if (tag == ACL_USER) {
-                uid_t *id = (uid_t *)acl_get_qualifier(entry);
-                if (*id == pw->pw_uid) {
-                    found_user = 1;
-                    if (acl_get_perm(ps, req_bit)) user_perms = 1;
+                uid_t *uid = (uid_t *)acl_get_qualifier(entry);
+                if (*uid == pw->pw_uid) {
+                    found = 1;
+                    if (acl_get_perm(ps, req)) user_perms = 1;
                 }
-                acl_free(id);
+                acl_free(uid);
             }
         }
-        if (found_user) {
-            if (user_perms && (mask & req_bit)) {
-                allowed = 1;
-                final_reason = "Allowed by User ACL (constrained by Mask)";
-            }
-            acl_free(acl);
-            goto result;
+        if (found) {
+            if (user_perms && (mask & req)) { allowed = 1; reason = "ACL User entry allowed (restricted by mask)"; }
+            else { reason = "ACL or Mask denied access"; }
+            acl_free(acl); goto result;
         }
         acl_free(acl);
     }
 
-    int grp_bit = (strcmp(op_str, "read") == 0) ? S_IRGRP : 
-                  (strcmp(op_str, "write") == 0) ? S_IWGRP : S_IXGRP;
-    if (pw->pw_gid == sb.st_gid && (sb.st_mode & grp_bit)) {
-        allowed = 1;
-        final_reason = "Match in Group bits";
+    // 4. Group & Other
+    int g_bit = (strcmp(op_str, "read") == 0) ? S_IRGRP : 
+                (strcmp(op_str, "write") == 0) ? S_IWGRP : S_IXGRP;
+    if (pw->pw_gid == sb.st_gid && (sb.st_mode & g_bit)) {
+        allowed = 1; reason = "Group bits match";
+    } else {
+        int o_bit = (strcmp(op_str, "read") == 0) ? S_IROTH : 
+                    (strcmp(op_str, "write") == 0) ? S_IWOTH : S_IXOTH;
+        if (sb.st_mode & o_bit) { allowed = 1; reason = "Other bits match"; }
     }
 
 result:
-    printf("PREDICTION: %s\nREASON: %s\n", allowed ? "ALLOW" : "DENY", final_reason);
+    printf("PREDICTION: %s\nREASON: %s\n", allowed ? "ALLOW" : "DENY", reason);
     return 0;
 }
