@@ -15,6 +15,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Fixed scope: Define these at the top
     char *target_user = argv[1];
     char *op_str = argv[2];
     char *path = argv[3];
@@ -31,8 +32,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Required output for reasoning
+    // Mandatory reasoning output
     printf("Reasoning for user : %s (UID : %u)\n", target_user, pw->pw_uid);
+    printf("Reasoning for %s on %s (%s)\n", target_user, path, op_str);
     printf("File Owner UID: %u | File Group GID : %u\n", sb.st_uid, sb.st_gid);
     printf("Traditional Mode : %o\n", sb.st_mode & 0777);
 
@@ -52,7 +54,7 @@ int main(int argc, char *argv[]) {
         goto result;
     }
 
-    // 3. ACL & Mask Check (FreeBSD API)
+    // 3. ACL & Mask Check (FreeBSD Logic)
     acl_t acl = acl_get_file(path, ACL_TYPE_ACCESS);
     if (acl) {
         acl_entry_t entry;
@@ -83,14 +85,14 @@ int main(int argc, char *argv[]) {
             }
         }
         if (found) {
-            if (user_perms && (mask & req)) { allowed = 1; reason = "ACL User entry allowed (restricted by mask)"; }
+            if (user_perms && (mask & req)) { allowed = 1; reason = "ACL User entry allowed (within mask)"; }
             else { reason = "ACL or Mask denied access"; }
             acl_free(acl); goto result;
         }
         acl_free(acl);
     }
 
-    // 4. Group & Other
+    // 4. Group & Other Check
     int g_bit = (strcmp(op_str, "read") == 0) ? S_IRGRP : 
                 (strcmp(op_str, "write") == 0) ? S_IWGRP : S_IXGRP;
     if (pw->pw_gid == sb.st_gid && (sb.st_mode & g_bit)) {
