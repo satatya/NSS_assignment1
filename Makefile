@@ -1,11 +1,13 @@
 CC = cc
 CFLAGS = -Wall
+# Explicitly link the ACL library for FreeBSD
+LIBS = -lacl 
 TARGETS = accheck accheck-helper accheck-test-read accheck-test-write accheck-test-exec
 
 all: $(TARGETS)
 
 accheck: accheck.c
-	$(CC) $(CFLAGS) accheck.c -o accheck
+	$(CC) $(CFLAGS) accheck.c -o accheck $(LIBS)
 
 accheck-helper: accheck-helper.c
 	$(CC) $(CFLAGS) accheck-helper.c -o accheck-helper
