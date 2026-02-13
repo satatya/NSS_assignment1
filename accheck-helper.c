@@ -6,40 +6,27 @@
 #include <errno.h>
 
 int main(int argc, char *argv[]) {
-    if (argc != 4) {
-        fprintf(stderr, "Usage: %s <user> <read/write/execute> <path>\n", argv[0]);
-        return 1;
-    }
-
+    if (argc != 4) return 1;
     struct passwd *pw = getpwnam(argv[1]);
-    if (!pw) {
-        fprintf(stderr, "User %s not found\n", argv[1]);
-        return 1;
-    }
+    if (!pw) return 1;
 
-    // Switch identity to target user [cite: 1084-1085]
+    // Drop privileges to target user
     if (setgid(pw->pw_gid) != 0 || setuid(pw->pw_uid) != 0) {
-        perror("Failed to drop privileges");
+        perror("Privilege drop failed");
         return 1;
     }
 
-    FILE *f;
+    int success = 0;
     if (strcmp(argv[2], "read") == 0) {
-        f = fopen(argv[3], "r");
+        FILE *f = fopen(argv[3], "r");
+        if (f) { success = 1; fclose(f); }
     } else if (strcmp(argv[2], "write") == 0) {
-        f = fopen(argv[3], "a");
+        FILE *f = fopen(argv[3], "a");
+        if (f) { success = 1; fclose(f); }
     } else if (strcmp(argv[2], "execute") == 0) {
-        if (access(argv[3], X_OK) == 0) {
-            printf("KERNEL RESULT: ALLOW\n");
-            return 0;
-        } else f = NULL;
+        if (access(argv[3], X_OK) == 0) success = 1;
     }
 
-    if (f) {
-        printf("KERNEL RESULT: ALLOW\n");
-        fclose(f);
-    } else {
-        printf("KERNEL RESULT: DENY (Error: %s)\n", strerror(errno));
-    }
+    printf("KERNEL RESULT: %s\n", success ? "ALLOW" : "DENY");
     return 0;
 }
