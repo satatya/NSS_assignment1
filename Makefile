@@ -21,5 +21,3 @@ accheck-test-exec: accheck-test-exec.c
 
 clean:
 	rm -f $(TARGETS)
-
-# Note: After running 'make', you must manually run 'chmod 4755' on the helper and test binaries as root.
