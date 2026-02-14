@@ -1,17 +1,29 @@
-#include <stdio.h>
-#include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+static void die_usage(void) {
+    fprintf(stderr, "Usage: accheck-test-write <path>\n");
+    _exit(2);
+}
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) return 1;
-    setuid(getuid()); // Explicitly drop privileges [cite: 1097]
-    FILE *f = fopen(argv[1], "a");
-    if (f) {
-        printf("Write Success\n");
-        fclose(f);
-    } else {
-        printf("Write Failed: %s\n", strerror(errno));
+    if (argc != 2) die_usage();
+
+    if (setuid(getuid()) != 0) {
+        fprintf(stderr, "setuid drop failed: %s\n", strerror(errno));
+        return 2;
     }
+
+    int fd = open(argv[1], O_WRONLY | O_APPEND);
+    if (fd < 0) {
+        printf("DENIED\n");
+        return 0;
+    }
+
+    close(fd);
+    printf("ALLOWED\n");
     return 0;
 }
