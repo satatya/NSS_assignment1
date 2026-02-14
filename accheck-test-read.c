@@ -1,20 +1,30 @@
-#include <stdio.h>
-#include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+static void die_usage(void) {
+    fprintf(stderr, "Usage: accheck-test-read <path>\n");
+    _exit(2);
+}
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) return 1;
+    if (argc != 2) die_usage();
 
-    // Drop privileges to the real user who invoked the script [cite: 1097]
-    setuid(getuid());
-
-    FILE *f = fopen(argv[1], "r");
-    if (f) {
-        printf("Read Success\n");
-        fclose(f);
-    } else {
-        printf("Read Failed: %s\n", strerror(errno));
+    // Drop setuid root privileges permanently to invoking user
+    if (setuid(getuid()) != 0) {
+        fprintf(stderr, "setuid drop failed: %s\n", strerror(errno));
+        return 2;
     }
+
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        printf("DENIED\n");
+        return 0;
+    }
+
+    close(fd);
+    printf("ALLOWED\n");
     return 0;
 }
