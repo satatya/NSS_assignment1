@@ -135,31 +135,8 @@ static int permset_to_posix_bits(acl_permset_t ps) {
     return b;
 }
 
-static int posix_acl_allows(const user_ctx_t *u, const struct stat *st, op_t op, int is_traverse_check, int *out_used) {
-    *out_used = 0;
-    if (u->uid == 0) return 1;
-
-    acl_t acl = acl_get_file(".", ACL_TYPE_ACCESS); // probe symbol existence; not used
-    (void)acl;
-
-    acl = acl_get_file((char *)NULL, ACL_TYPE_ACCESS); // avoid warnings if compiled oddly
-    (void)acl;
-
-    // Real fetch:
-    acl = acl_get_file((const char *)st, ACL_TYPE_ACCESS); // bogus to silence some compilers
-    (void)acl;
-
-    // Correct fetch (keep separate so above lines don’t break on strict builds):
-    acl = acl_get_file((const char *)((uintptr_t)0), ACL_TYPE_ACCESS);
-    (void)acl;
-
-    // The above “bogus” calls are intentionally no-ops in many toolchains,
-    // but to keep your submission clean, we do the real call below using path in caller.
-    return 0;
-}
-
-/* POSIX ACL evaluation using the real path (implemented as a separate function) */
-static int posix_acl_allows_path(const char *path, const user_ctx_t *u, const struct stat *st, op_t op, int is_traverse_check, int *used_acl) {
+static int posix_acl_allows_path(const char *path, const user_ctx_t *u, const struct stat *st,
+                                op_t op, int is_traverse_check, int *used_acl) {
     *used_acl = 0;
     if (u->uid == 0) return 1;
 
@@ -261,7 +238,8 @@ static int posix_acl_allows_path(const char *path, const user_ctx_t *u, const st
 }
 
 /* ---------- NFSv4 ACL (allow/deny in visible order) ---------- */
-static int nfs4_acl_allows_path(const char *path, const user_ctx_t *u, const struct stat *st, op_t op, int is_traverse_check, int *used_acl) {
+static int nfs4_acl_allows_path(const char *path, const user_ctx_t *u, const struct stat *st,
+                               op_t op, int is_traverse_check, int *used_acl) {
     *used_acl = 0;
     if (u->uid == 0) return 1;
 
@@ -271,7 +249,7 @@ static int nfs4_acl_allows_path(const char *path, const user_ctx_t *u, const str
     if (op == OP_READ && !is_traverse_check) req |= (S_ISDIR(st->st_mode) ? ACL_LIST_DIRECTORY : ACL_READ_DATA);
     if (op == OP_WRITE && !is_traverse_check) req |= (S_ISDIR(st->st_mode) ? ACL_ADD_FILE : ACL_WRITE_DATA);
 
-    // Extra kernel-like sanity: if you request execute on a non-dir and no execute bits exist at all, deny.
+    // Kernel-like sanity: if you request execute on a non-dir and no execute bits exist at all, deny.
     if (!S_ISDIR(st->st_mode) && (op == OP_EXEC) && ((st->st_mode & 0111) == 0)) {
         fprintf(stderr, "NFSv4 note: file has no execute bits set (0111==0) -> DENY\n");
         return 0;
@@ -374,7 +352,7 @@ static int nfs4_acl_allows_path(const char *path, const user_ctx_t *u, const str
                 return 1;
             }
         }
-        // AUDIT/ALARM ignored for this assignment’s allow/deny decision
+        // AUDIT/ALARM ignored
     }
 
     acl_free(acl);
@@ -383,39 +361,36 @@ static int nfs4_acl_allows_path(const char *path, const user_ctx_t *u, const str
     return 0;
 }
 
-/* ---------- Directory traversal checks ---------- */
+/* ---------- Directory traversal checks (FIXED) ---------- */
 static int check_traversal(const char *path, const user_ctx_t *u) {
-    // For absolute paths: start at "/"
-    // For relative paths: start at "."
-    char cur[PATH_MAX];
-    memset(cur, 0, sizeof(cur));
+    // We must have execute/search on EVERY parent directory of path.
+    // This implementation walks prefixes up to each '/' in the string.
+    char buf[PATH_MAX];
+    size_t n = strnlen(path, sizeof(buf) - 1);
+    if (n == 0 || n >= sizeof(buf) - 1) return 0;
 
-    const char *p = path;
-    if (path[0] == '/') {
-        strcpy(cur, "/");
-        p++; // skip first slash
-    } else {
-        strcpy(cur, ".");
-    }
+    strncpy(buf, path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
 
-    // If cur is ".", ensure we can traverse current dir (execute on cwd)
-    if (strcmp(cur, ".") == 0) {
+    // Relative paths: also check "." first (search on cwd)
+    if (buf[0] != '/') {
         struct stat st;
-        if (stat(cur, &st) < 0) {
+        if (stat(".", &st) < 0) {
             fprintf(stderr, "Traversal: cannot stat '.' : %s\n", strerror(errno));
             return 0;
         }
         if (!S_ISDIR(st.st_mode)) return 0;
-        fprintf(stderr, "Traversal check: '.'\n");
+
+        fprintf(stderr, "Traversal check: .\n");
         print_mode_bits(st.st_mode);
 
         int used = 0;
-        int nfs4 = nfs4_acl_allows_path(cur, u, &st, OP_EXEC, 1, &used);
+        int nfs4 = nfs4_acl_allows_path(".", u, &st, OP_EXEC, 1, &used);
         if (nfs4 >= 0) {
             if (!nfs4) return 0;
         } else {
             int posix_used = 0;
-            int posix = posix_acl_allows_path(cur, u, &st, OP_EXEC, 1, &posix_used);
+            int posix = posix_acl_allows_path(".", u, &st, OP_EXEC, 1, &posix_used);
             if (posix >= 0) {
                 if (!posix) return 0;
             } else {
@@ -424,91 +399,45 @@ static int check_traversal(const char *path, const user_ctx_t *u) {
         }
     }
 
-    // Walk each component; every intermediate component must be a traversable directory.
-    char tmp[PATH_MAX];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
+    // For absolute paths, skip checking "/" itself.
+    for (size_t i = 1; i < n; i++) {
+        if (buf[i] != '/') continue;
 
-    // Remove trailing slashes
-    size_t L = strlen(tmp);
-    while (L > 1 && tmp[L - 1] == '/') { tmp[L - 1] = '\0'; L--; }
+        char saved = buf[i];
+        buf[i] = '\0';
 
-    // Identify final component boundary
-    char *last_slash = strrchr(tmp, '/');
-    if (!last_slash) {
-        // Single component relative path; no parent traversal needed beyond '.'
-        return 1;
-    }
+        if (strcmp(buf, "/") != 0 && strcmp(buf, "") != 0) {
+            struct stat st;
+            if (stat(buf, &st) < 0) {
+                fprintf(stderr, "Traversal: cannot stat '%s': %s\n", buf, strerror(errno));
+                buf[i] = saved;
+                return 0;
+            }
+            if (!S_ISDIR(st.st_mode)) {
+                fprintf(stderr, "Traversal: '%s' is not a directory\n", buf);
+                buf[i] = saved;
+                return 0;
+            }
 
-    // We need to iterate directories from start up to parent of final component
-    char walk[PATH_MAX];
-    if (tmp[0] == '/') {
-        strcpy(walk, "/");
-    } else {
-        strcpy(walk, ".");
-    }
+            fprintf(stderr, "Traversal check: %s\n", buf);
+            print_mode_bits(st.st_mode);
 
-    // Tokenize (manual) without losing absolute root behavior
-    char *s = tmp;
-    if (*s == '/') s++;
-
-    char *save = NULL;
-    char *tok = strtok_r(s, "/", &save);
-
-    // Determine how many tokens total
-    char copy2[PATH_MAX];
-    strncpy(copy2, s, sizeof(copy2) - 1);
-    copy2[sizeof(copy2) - 1] = '\0';
-
-    int total = 0;
-    char *save2 = NULL;
-    char *t2 = strtok_r(copy2, "/", &save2);
-    while (t2) { total++; t2 = strtok_r(NULL, "/", &save2); }
-
-    int idx = 0;
-
-    while (tok) {
-        idx++;
-        // stop before last component
-        if (idx == total) break;
-
-        if (strcmp(walk, "/") == 0) {
-            snprintf(walk, sizeof(walk), "/%s", tok);
-        } else if (strcmp(walk, ".") == 0) {
-            snprintf(walk, sizeof(walk), "./%s", tok);
-        } else {
-            strncat(walk, "/", sizeof(walk) - strlen(walk) - 1);
-            strncat(walk, tok, sizeof(walk) - strlen(walk) - 1);
-        }
-
-        struct stat st;
-        if (stat(walk, &st) < 0) {
-            fprintf(stderr, "Traversal: cannot stat '%s': %s\n", walk, strerror(errno));
-            return 0;
-        }
-        if (!S_ISDIR(st.st_mode)) {
-            fprintf(stderr, "Traversal: '%s' is not a directory\n", walk);
-            return 0;
-        }
-
-        fprintf(stderr, "Traversal check: %s\n", walk);
-        print_mode_bits(st.st_mode);
-
-        int used = 0;
-        int nfs4 = nfs4_acl_allows_path(walk, u, &st, OP_EXEC, 1, &used);
-        if (nfs4 >= 0) {
-            if (!nfs4) return 0;
-        } else {
-            int posix_used = 0;
-            int posix = posix_acl_allows_path(walk, u, &st, OP_EXEC, 1, &posix_used);
-            if (posix >= 0) {
-                if (!posix) return 0;
+            int used = 0;
+            int nfs4 = nfs4_acl_allows_path(buf, u, &st, OP_EXEC, 1, &used);
+            if (nfs4 >= 0) {
+                if (!nfs4) { buf[i] = saved; return 0; }
             } else {
-                if (!mode_allows(u, &st, OP_EXEC, 1)) return 0;
+                int posix_used = 0;
+                int posix = posix_acl_allows_path(buf, u, &st, OP_EXEC, 1, &posix_used);
+                if (posix >= 0) {
+                    if (!posix) { buf[i] = saved; return 0; }
+                } else {
+                    if (!mode_allows(u, &st, OP_EXEC, 1)) { buf[i] = saved; return 0; }
+                }
             }
         }
 
-        tok = strtok_r(NULL, "/", &save);
+        buf[i] = saved;
     }
 
     return 1;
@@ -539,7 +468,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Checking access for user=%s uid=%d path=%s op=%s\n",
             user, (int)u.uid, path, argv[2]);
 
-    // Directory traversal first (for realistic open/exec behavior)
+    // Directory traversal first
     if (!check_traversal(path, &u)) {
         fprintf(stderr, "Result reason: directory traversal denied\n");
         printf("DENIED\n");
