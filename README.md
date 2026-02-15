@@ -1,83 +1,256 @@
-# Access Control Reasoning and Validation (NSS Assignment 1)
-
-## Project Overview
-This project explores the mechanics of Unix access control by implementing a two-part system:
-1. **The Predictor (`accheck`)**: A metadata-driven engine that reasons about file access based on traditional Unix permission bits (Owner/Group/Other).
-2. **The Validator (`accheck-helper`)**: A security-conscious tool that validates those predictions by attempting real file operations after dropping root privileges to match a target user's identity.
-
-The system is specifically designed to handle and highlight discrepancies between **Traditional Unix Permissions** and modern **NFSv4 ACLs** on FreeBSD.
+# NSS2 Assignment 1 — Access Control Reasoning & Validation on FreeBSD  
+**Subject:** Networks and Systems Security II (NSS2)  
+**Name:** Satatya De  
+**Roll:** MT25084  
+**Program:** M.Tech CSE (1st Year)  
 
 ---
 
-## Technical Features
-* **Metadata Extraction**: Uses `stat(2)` to retrieve UIDs, GIDs, and mode bits.
-* **Identity Management**: Uses `getpwnam(3)` to resolve usernames and `setuid(2)`/`setgid(2)` for privilege management.
-* **Secure Privilege Dropping**: Standalone test programs demonstrate that a process cannot regain root "powers" once privileges are dropped.
+## 1) Project Overview
+
+This assignment studies **how FreeBSD decides file access** by building a small toolchain that shows:
+
+1) **Predictor — `accheck`**  
+   A reasoning engine that *predicts* whether a user should be allowed to perform an operation (`read/write/execute`) on a path.  
+   It prints the decision plus the reasoning (mode bits, ACL brand, matched class, traversal checks).
+
+2) **Validator — `accheck-helper` (setuid-root)**  
+   A validator that shows **kernel truth** by adopting the target identity (UID/GID/groups) and then attempting the real operation.
+   The kernel decision (success/failure) is the ground truth.
+
+3) **Security Test Suite — `accheck-test-read/write/exec` (setuid-root)**  
+   Demonstrates the secure "drop-early" pattern: the program starts setuid-root but immediately drops privileges to the real invoking user,
+   then attempts the operation.
+
+The key learning is:  
+> **Reasoning is not enforcement.** `accheck` explains, `accheck-helper` verifies.
 
 ---
 
-## Build & Installation
+## 2) Compliance Note (Important)
 
-### Compilation
-The project includes a `Makefile` that uses pattern rules for efficient building.
-```bash
+Per A1 rule: **no bash/assembly for permission checking inside the code**.
+
+- The C programs do **not** use `system()`, `popen()`, or shelling out to `ls/getfacl`.
+- No inline assembly is used for checking permissions.
+- Decisions are derived using **C system calls / FreeBSD APIs**:  
+  `stat(2)`, `getpwnam(3)`, `getgrouplist(3)`, ACL APIs like `acl_get_file(3)`, and real kernel enforcement via `open(2)` / `execve(2)` in the helper.
+
+(You may still run terminal commands manually for setup and screenshots; the restriction is about what the C programs do.)
+
+---
+
+## 3) Files in the Submission
+
+Your submission directory contains:
+
+- `accheck.c` — predictor (reasoning engine)
+- `accheck-helper.c` — validator (setuid-root, kernel truth)
+- `accheck-test-read.c` — setuid-root test (drops privilege, then read)
+- `accheck-test-write.c` — setuid-root test (drops privilege, then write/append)
+- `accheck-test-exec.c` — setuid-root test (drops privilege, then execute/search)
+- `Makefile` — builds all targets
+- `README.md` — this document
+
+---
+
+## 4) Build Instructions
+
+### 4.1 Compile
+```sh
 make clean
 make
 ```
 
-### Security Configuration (Mandatory)
+### 4.2 SetUID configuration (Mandatory, run as root)
 
-The validator and test suite must be owned by `root` and have the **SetUID** bit enabled to allow identity switching during validation.
-```bash
-# Run as root
-chown root accheck-helper accheck-test-read accheck-test-write accheck-test-exec
+These binaries must be setuid-root for identity switching and controlled tests:
+```sh
+chown root:wheel accheck-helper accheck-test-read accheck-test-write accheck-test-exec
 chmod 4755 accheck-helper accheck-test-read accheck-test-write accheck-test-exec
 ```
 
 ---
 
-## Testing Scenarios & Results
+## 5) Usage
 
-### 1. Traditional Logic (Predictor)
+### 5.1 Predictor: accheck
+```sh
+./accheck <user> <read|write|execute> <path>
+```
 
-**Scenario**: Testing an outsider's access to a file with `640` permissions.
+Examples:
+```sh
+./accheck bob read /srv/testlab/secret.txt 2>&1
+./accheck bob write /srv/testlab/secret.txt 2>&1
+./accheck bob execute /srv/testlab/runme.sh 2>&1
+```
 
-* **Setup**: File owned by `alice:labgroup` with mode `640`.
-* **Action**: `./accheck charlie read secret.txt`
-* **Result**: `PREDICTION: DENY`.
-* **Reasoning**: Charlie (UID 1004) is not the owner (UID 1002) and is not in the group. The "Other" bits are `0`, resulting in a denial.
+Tip: `2>&1` keeps the reasoning output together (useful for screenshots).
 
-### 2. Kernel Validation (The NFSv4 ACL Case)
+### 5.2 Validator: accheck-helper
+```sh
+./accheck-helper <user> <read|write|execute> <path>
+```
 
-**Scenario**: Verifying access when a specific NFSv4 ACL overrides traditional bits.
+Examples:
+```sh
+./accheck-helper bob read /srv/testlab/secret.txt
+./accheck-helper bob write /srv/testlab/secret.txt
+```
 
-* **Setup**: Grant user `bob` read access via `setfacl -m u:bob:r:allow secret.txt`.
-* **Action**: Compare `./accheck bob read` vs `./accheck-helper bob read`.
-* **Result**:
-  * **accheck**: `PREDICTION: DENY` (sees only traditional bits).
-  * **accheck-helper**: `KERNEL RESULT: ALLOW` (kernel respects the ACL).
+### 5.3 Drop-early test suite
 
-* **Significance**: This demonstrates that while the predictor is useful for reasoning, the validator is the "source of truth" as it uses actual kernel logic.
-
-### 3. Privilege Dropping Verification
-
-**Scenario**: Ensuring a SetUID-root program cannot "cheat" the system after dropping privileges.
-
-* **Action**: Run `./accheck-test-read secret.txt` as user `charlie`.
-* **Result**: `Permission denied`.
-* **Reasoning**: Even though the binary has the SetUID bit, the code calls `setuid(getuid())` immediately, forcing it to follow Charlie's restricted permissions.
+Run these as an unprivileged user (example: bob):
+```sh
+su - bob
+cd /path/to/repo
+./accheck-test-read  /srv/testlab/secret.txt
+./accheck-test-write /srv/testlab/secret.txt
+./accheck-test-exec  /srv/testlab/runme.sh
+exit
+```
 
 ---
 
-## Error Handling
+## 6) Test Scenarios (at least 3)
 
-* **Non-existent Path**: Reports "stat failed: No such file or directory" via `perror`.
-* **Unknown User**: Reports "User [name] not found" if `getpwnam()` returns NULL.
-* **Invalid Operations**: Rejects strings other than "read", "write", or "execute".
+### Scenario A — NFSv4 ACL override on a 640 file
+
+**Goal:** Show ACL can grant access even when mode bits would deny.
+
+**Setup (root):**
+```sh
+mkdir -p /srv/testlab
+echo "TOP SECRET" > /srv/testlab/secret.txt
+chown alice:labgroup /srv/testlab/secret.txt
+chmod 640 /srv/testlab/secret.txt
+
+# Give bob explicit read via NFSv4 ACL
+setfacl -m u:bob:r:allow /srv/testlab/secret.txt
+```
+
+**Observe:**
+```sh
+./accheck bob read  /srv/testlab/secret.txt 2>&1
+./accheck bob write /srv/testlab/secret.txt 2>&1
+./accheck-helper bob read  /srv/testlab/secret.txt
+./accheck-helper bob write /srv/testlab/secret.txt
+```
+
+**Expected result:**
+
+- **Read:** ALLOWED (ACL allow)
+- **Write:** DENIED
+
+This demonstrates the ACL layer and why the helper is the final authority.
 
 ---
 
-## Author
-* **Name**: Satatya De
-* **Roll Number**: MT25084
-* **System**: FreeBSD 15.0-CURRENT
+### Scenario B — Directory traversal restriction beats file ACL
+
+**Goal:** Show that even if a file ACL allows read, the directory must be traversable.
+
+**Setup (root):**
+```sh
+mkdir -p /srv/testlab/notraverse
+echo "INSIDE" > /srv/testlab/notraverse/inside.txt
+chown -R alice:labgroup /srv/testlab/notraverse
+chmod 700 /srv/testlab/notraverse
+
+# Even if bob is allowed on the file...
+setfacl -m u:bob:r:allow /srv/testlab/notraverse/inside.txt
+```
+
+**Observe:**
+```sh
+./accheck bob read /srv/testlab/notraverse/inside.txt 2>&1
+./accheck-helper bob read /srv/testlab/notraverse/inside.txt
+```
+
+**Expected result:**  
+Both tools show DENIED, with `accheck` explicitly identifying which parent directory blocks traversal.
+
+---
+
+### Scenario C — Privilege-drop execution test (drop-early pattern)
+
+**Goal:** Show a setuid-root program can drop privileges and then behave like the real user.
+
+**Setup (root):**
+```sh
+printf "#!/bin/sh\necho RUN_OK\n" > /srv/testlab/runme.sh
+chown alice:labgroup /srv/testlab/runme.sh
+chmod 755 /srv/testlab/runme.sh
+```
+
+**Observe (as bob):**
+```sh
+su - bob
+cd /path/to/repo
+./accheck-test-exec /srv/testlab/runme.sh
+exit
+```
+
+**Expected result:**  
+`accheck-test-exec` prints ALLOWED (because bob can execute/search due to 755).  
+**Key point:** it does NOT rely on "root powers" after dropping privileges.
+
+---
+
+### Scenario D (extra) — Supplementary group access via mode bits
+
+**Goal:** Show group membership affects access via the group bits.
+
+**Setup (root):**
+```sh
+pw groupadd projgrp
+pw groupmod projgrp -m bob
+
+echo "GROUP DATA" > /srv/testlab/groupfile.txt
+chown alice:projgrp /srv/testlab/groupfile.txt
+chmod 640 /srv/testlab/groupfile.txt
+```
+
+**Observe:**
+```sh
+./accheck bob read /srv/testlab/groupfile.txt 2>&1
+./accheck-helper bob read /srv/testlab/groupfile.txt
+```
+
+**Expected result:**  
+Both show ALLOWED due to group match.
+
+---
+
+## 7) Error Cases Handled (3 examples)
+
+**Unknown user**  
+If the username is invalid, `getpwnam()` fails and the program exits cleanly with an error.
+
+**Invalid path / stat failure**  
+If the path doesn't exist (or cannot be stated), `stat()` fails and the program prints the OS error (errno) and exits safely.
+
+**Invalid operation argument**  
+Only `read`, `write`, `execute` are accepted. Any other string triggers a usage message and a non-zero exit.
+
+---
+
+## 8) What this assignment demonstrates (short takeaway)
+
+- **Mode bits** are only one layer of access control.
+- **NFSv4 ACLs** can override mode-bit expectations.
+- **Directory traversal** (search permission) is required regardless of file ACLs.
+- A **setuid-root program** becomes safe when it drops privileges early, letting the kernel enforce normal policy.
+
+---
+
+## 9) Quick Submission Checklist
+
+- ✓ `make clean && make` builds all binaries
+- ✓ setuid set on: `accheck-helper` and `accheck-test-*`
+- ✓ I have screenshots for:
+  - `secret.txt` ACL + read allowed, write denied (predictor + helper)
+  - traversal denial (predictor + helper)
+  - priv-drop exec test as bob
+  - (optional) supplementary group scenario
