@@ -36,13 +36,13 @@ Per A1 rule: **no bash/assembly for permission checking inside the code**.
 - Decisions are derived using **C system calls / FreeBSD APIs**:  
   `stat(2)`, `getpwnam(3)`, `getgrouplist(3)`, ACL APIs like `acl_get_file(3)`, and real kernel enforcement via `open(2)` / `execve(2)` in the helper.
 
-(You may still run terminal commands manually for setup and screenshots; the restriction is about what the C programs do.)
+
 
 ---
 
 ## 3) Files in the Submission
 
-Your submission directory contains:
+My submission directory contains:
 
 - `accheck.c` — predictor (reasoning engine)
 - `accheck-helper.c` — validator (setuid-root, kernel truth)
